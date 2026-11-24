@@ -75,6 +75,39 @@ function createVesselIcon() {
 
 const VESSEL_ICON = createVesselIcon();
 
+/**
+ * Fallback marker for vessels whose True Heading is exactly 0.
+ *
+ * In AIS, heading 511 means "not available", but receivers and installations
+ * without a gyro compass commonly fill in 0 instead. In this dataset 57% of
+ * reports carry heading 0, and 20% of those are moving on a non-north course,
+ * so drawing them as north-pointing hulls would assert a bearing the data does
+ * not support. A symmetric disc says "direction unknown" instead.
+ */
+function createRoundIcon() {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return undefined;
+
+  ctx.beginPath();
+  ctx.arc(32, 32, 14, 0, Math.PI * 2);
+  ctx.closePath();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = 'rgba(6, 14, 24, 0.92)';
+  ctx.stroke();
+
+  return canvas.toDataURL('image/png');
+}
+
+const ROUND_ICON = createRoundIcon();
+
 /** FNV-1a, used to spread vessels of the same class across LOD buckets. */
 function hashMmsi(mmsi) {
   let h = 2166136261;
@@ -275,6 +308,8 @@ export class VoyageScene {
     }
     this.cart = cart;
     this.staleState = new Uint8Array(this.vessels.length);
+    // 0 = hull silhouette, 1 = disc for heading == 0.
+    this.roundState = new Uint8Array(this.vessels.length);
 
     this.lodBuckets = Array.from({ length: LOD_BUCKETS }, () => []);
 
@@ -419,13 +454,26 @@ export class VoyageScene {
         // silently skip the vertex buffer update.
         billboard.position = pos;
 
-        // Heading is preferred; course over ground is the fallback for vessels
-        // that do not transmit a gyro heading.
-        const headingDeg = Number.isFinite(fixHeading[k])
-          ? fixHeading[k]
-          : (Number.isFinite(fixCog[k]) ? fixCog[k] : 0);
-        const rotation = camHeading - Cesium.Math.toRadians(headingDeg);
-        if (billboard.rotation !== rotation) billboard.rotation = rotation;
+        // heading === 0 means "no reliable bearing" in practice (see the icon
+        // factory above): draw a disc rather than a north-pointing hull.
+        const noHeading = fixHeading[k] === 0;
+        const roundFlag = noHeading ? 1 : 0;
+        if (this.roundState[i] !== roundFlag) {
+          this.roundState[i] = roundFlag;
+          billboard.image = noHeading ? ROUND_ICON : VESSEL_ICON;
+        }
+
+        if (noHeading) {
+          if (billboard.rotation !== 0) billboard.rotation = 0;
+        } else {
+          // Heading is preferred; course over ground is the fallback for
+          // vessels that report an out-of-range heading.
+          const headingDeg = Number.isFinite(fixHeading[k])
+            ? fixHeading[k]
+            : (Number.isFinite(fixCog[k]) ? fixCog[k] : 0);
+          const rotation = camHeading - Cesium.Math.toRadians(headingDeg);
+          if (billboard.rotation !== rotation) billboard.rotation = rotation;
+        }
 
         if (!billboard.show) billboard.show = true;
 

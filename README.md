@@ -106,6 +106,10 @@ imagery provider terms and the Cesium licence.
 - Space: play / pause. Left/Right: step 30 s. Esc: close the info panel.
 - Vessels are drawn as hull silhouettes rotated to their heading (course over
   ground when heading is unavailable), so direction is readable at a glance.
+  A vessel reporting heading exactly 0 is drawn as a disc instead: AIS uses 0
+  as a placeholder when no gyro compass is fitted, and 57% of this feed's
+  reports carry that value, so a north-pointing hull would assert a bearing the
+  data does not support.
 -Vessel density adapts to zoom: the full set is drawn below 400 km altitude,
   and progressively fewer (about 2,000 globally, commercial traffic first) at
   wider views. Selection is stable, so markers do not flicker while panning.
