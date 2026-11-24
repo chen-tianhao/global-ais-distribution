@@ -42,8 +42,10 @@ const SCALE_BY_DISTANCE = new Cesium.NearFarScalar(
 );
 
 /**
- * Hull silhouette, bow up. White so that Billboard.color tints it per class;
- * the dark stroke stays dark after tinting because its RGB is near zero.
+ * Hull silhouette, bow up, drawn as a slim pentagon: pointed bow, widest at
+ * the shoulders, slightly narrower at the transom. White so that
+ * Billboard.color tints it per class; the dark stroke stays dark after tinting
+ * because its RGB is near zero.
  */
 function createVesselIcon() {
   const size = 64;
@@ -55,12 +57,10 @@ function createVesselIcon() {
 
   ctx.beginPath();
   ctx.moveTo(32, 2);   // bow
-  ctx.lineTo(47, 18);  // starboard shoulder
-  ctx.lineTo(47, 47);
-  ctx.lineTo(38, 62);  // starboard quarter
-  ctx.lineTo(26, 62);  // port quarter
-  ctx.lineTo(17, 47);
-  ctx.lineTo(17, 18);  // port shoulder
+  ctx.lineTo(45, 20);  // starboard shoulder (widest point)
+  ctx.lineTo(42, 62);  // starboard quarter
+  ctx.lineTo(22, 62);  // port quarter
+  ctx.lineTo(19, 20);  // port shoulder (widest point)
   ctx.closePath();
 
   ctx.fillStyle = '#ffffff';

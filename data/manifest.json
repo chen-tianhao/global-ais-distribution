@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "binary": "ais-20231111T110500Z.bin",
+  "bytes": 9492235,
+  "source": [
+    "exactEarth-20231111-111000.csv",
+    "exactEarth-20231111-111500.csv"
+  ],
+  "generatedAt": "2026-11-24T04:44:18.660Z",
+  "timeMin": "2023-11-11T11:05:00.000Z",
+  "timeMax": "2023-11-11T11:15:00.000Z",
+  "vesselCount": 82595,
+  "reportCount": 187638,
+  "skipped": 0,
+  "dropped": 0,
+  "invalidImo": 1562,
+  "nonShipMmsi": 1972,
+  "parseErrors": {}
+}
