@@ -24,6 +24,9 @@ exactEarth-*.csv
 # 若需提交少量样例数据，放到 sample/ 下并取消下一行注释
 # !sample/*.csv
 
+# 预处理产物（npm run prepare-data 生成，可由脚本重建）
+/data/
+
 # ---------- 本地工作区与备份 ----------
 # WorkBuddy 本地工作记忆（含会话/记忆文件），不入库
 .workbuddy/

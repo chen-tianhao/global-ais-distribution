@@ -1,19 +1,31 @@
 {
   "name": "ais-voyage-replay",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
+  "description": "Interactive replay of global AIS vessel positions",
+  "engines": {
+    "node": ">=18.17"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "prepare-data": "node scripts/prepare-data.mjs",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "format": "prettier --write ."
   },
   "dependencies": {
     "cesium": "^1.124.0",
     "papaparse": "^5.5.2"
   },
   "devDependencies": {
+    "@eslint/js": "^9.15.0",
+    "eslint": "^9.15.0",
+    "prettier": "^3.3.3",
     "vite": "^6.0.0",
-    "vite-plugin-cesium": "^1.2.23"
+    "vite-plugin-cesium": "^1.2.23",
+    "vitest": "^3.0.0"
   }
 }

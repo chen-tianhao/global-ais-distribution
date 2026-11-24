@@ -1,288 +1,565 @@
-import { CSV_FILES, CATEGORIES, CATEGORY_ORDER, categorize } from './config.js';
-import { t, setLang, getLang } from './i18n.js';
+// Application orchestration: data loading, clock, controls and info panel.
+
+import { CATEGORIES, CATEGORY_ORDER } from './config.js';
+import { t, setLang, getLang, formatTime, formatDate } from './i18n.js';
 import { VoyageScene } from './scene.js';
+import { loadDataset } from './data/loader.js';
+import { VesselPopup } from './ui/popup.js';
 
 const $ = (id) => document.getElementById(id);
+const SPEEDS = [30, 60, 120, 300];
+const STEP_MS = 30000;
 
 const state = {
   scene: null,
+  dataset: null,
+  popup: null,
   playing: false,
   speed: 60,
   lastFrame: 0,
-  selected: null,
+  selectedIndex: -1,
+  selectedVessel: null,
+  scrubbing: false,
+  resumeAfterScrub: false,
+  seekFraction: null,
+  categoryTotals: {},
+  mmsiIndex: new Map(),
+  pendingTime: null,
+  pendingMmsi: null,
+  uiBound: false,
+  urlTimer: 0,
 };
-const categoryCounts = {};
 
-function setLoading(detail) {
-  $('loadingDetail').textContent = detail;
+// ---------------------------------------------------------------------------
+// Chrome
+// ---------------------------------------------------------------------------
+
+function setLoading(title, detail) {
+  $('loadingTitle').textContent = title ?? t('loadingTitle');
+  $('loadingDetail').textContent = detail ?? '';
 }
 
-function showError(msg) {
+function showError(message) {
   $('loading').classList.add('hidden');
-  $('errorBanner').textContent = msg;
+  $('errorText').textContent = message;
   $('errorBanner').classList.remove('hidden');
 }
 
-async function fetchText(name) {
-  const res = await fetch(`/data/${encodeURIComponent(name)}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.text();
+function hideError() {
+  $('errorBanner').classList.add('hidden');
 }
 
-function parseInWorker(text, label) {
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('./parseWorker.js', import.meta.url), { type: 'module' });
-    worker.onmessage = (e) => {
-      const m = e.data;
-      if (m.type === 'progress') {
-        setLoading(`${t('parseDetail', label === 'A' ? 1 : 2, CSV_FILES.length)} · ${m.parsed.toLocaleString()}`);
-      } else if (m.type === 'done') {
-        worker.terminate();
-        resolve(m.vessels);
-      } else if (m.type === 'error') {
-        worker.terminate();
-        reject(new Error(m.message));
-      }
-    };
-    worker.onerror = (err) => { worker.terminate(); reject(err); };
-    worker.postMessage({ text, label });
-  });
+function updatePlayButton() {
+  const scene = state.scene;
+  const atEnd = scene ? scene.currentTime >= scene.timeMax : false;
+  const icon = state.playing ? 'icon-pause' : (atEnd ? 'icon-replay' : 'icon-play');
+  if ($('playIcon').className !== icon) $('playIcon').className = icon;
+
+  const label = state.playing
+    ? t('pause')
+    : (atEnd ? t('replay') : t('play'));
+  $('playBtn').title = label;
+  $('playBtn').setAttribute('aria-label', label);
+  $('resetBtn').title = t('restart');
 }
 
-function mergeVessels(groups) {
-  const map = new Map();
-  for (const list of groups) {
-    for (const v of list) {
-      if (!map.has(v.mmsi)) {
-        map.set(v.mmsi, v);
-        continue;
-      }
-      const existing = map.get(v.mmsi);
-      for (const f of v.fixes) existing.fixes.push(f);
-      if (!existing.name && v.name) existing.name = v.name;
-      if (!existing.type && v.type) existing.type = v.type;
-      if (!existing.flag && v.flag) existing.flag = v.flag;
-      if (!existing.dest && v.dest) existing.dest = v.dest;
-      if (!Number.isFinite(existing.length)) existing.length = v.length;
-      if (!Number.isFinite(existing.width)) existing.width = v.width;
+function updateStats() {
+  const dataset = state.dataset;
+  if (!dataset) return;
+  let visible = 0;
+  for (const key of CATEGORY_ORDER) {
+    if (state.scene?.isCategoryEnabled(key)) {
+      visible += state.categoryTotals[key] || 0;
     }
   }
-  const all = [...map.values()];
-  for (const v of all) {
-    v.fixes.sort((a, b) => a[0] - b[0]);
-    const deduped = [];
-    for (const f of v.fixes) {
-      if (!deduped.length || f[0] !== deduped[deduped.length - 1][0]) deduped.push(f);
-    }
-    v.fixes = deduped;
-    const key = categorize(v.type).key;
-    categoryCounts[key] = (categoryCounts[key] || 0) + 1;
-  }
-  all.sort((a, b) => a.fixes[0][0] - b.fixes[0][0]);
-  return all;
-}
-
-function fmtTime(ms) {
-  const d = new Date(ms);
-  return d.toISOString().slice(11, 19);
-}
-
-function fmtDate(ms) {
-  const d = new Date(ms);
-  return d.toISOString().slice(0, 10);
+  $('statVessels').textContent = `${visible.toLocaleString()} / ${dataset.vessels.length.toLocaleString()}`;
+  $('labelVessels').textContent = t('vessels');
+  $('statReports').textContent = dataset.stats.reportCount.toLocaleString();
+  $('labelReports').textContent = t('positionReports');
 }
 
 function buildLegend() {
   const body = $('legendBody');
-  body.innerHTML = '';
+  body.textContent = '';
+  const lang = getLang();
+
   for (const key of CATEGORY_ORDER) {
     const cat = CATEGORIES[key];
-    const count = categoryCounts[key] || 0;
     const row = document.createElement('button');
+    row.type = 'button';
     row.className = 'legend-row';
     row.dataset.key = key;
-    row.innerHTML = `<span class="swatch" style="background:${cat.color}"></span>
-      <span class="legend-name">${cat.en}</span>
-      <span class="legend-count">${count.toLocaleString()}</span>`;
+
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = cat.color;
+
+    const name = document.createElement('span');
+    name.className = 'legend-name';
+    name.textContent = lang === 'zh' ? cat.zh : cat.en;
+
+    const count = document.createElement('span');
+    count.className = 'legend-count';
+    count.textContent = (state.categoryTotals[key] || 0).toLocaleString();
+
+    row.append(swatch, name, count);
     row.addEventListener('click', () => {
-      const enabled = !state.scene.enabled.has(key);
+      const enabled = !state.scene.isCategoryEnabled(key);
       state.scene.setCategoryEnabled(key, enabled);
       row.classList.toggle('off', !enabled);
+      row.setAttribute('aria-pressed', String(enabled));
+      updateStats();
     });
+    row.setAttribute('aria-pressed', 'true');
     body.appendChild(row);
   }
 }
 
-function popupRow(label, value, unit = '') {
-  if (value === '' || value === null || value === undefined || (typeof value === 'number' && !Number.isFinite(value))) return '';
-  return `<div class="popup-row"><span class="k">${label}</span><span class="v">${value}${unit}</span></div>`;
+function setLegendCollapsed(collapsed) {
+  $('legendBody').classList.toggle('hidden', collapsed);
+  $('legendHint').classList.toggle('hidden', collapsed);
+  $('staleHint').classList.toggle('hidden', collapsed);
+  $('lodHint').classList.toggle('hidden', collapsed);
+  $('legendToggle').textContent = collapsed ? '+' : '−';
+  $('legendToggle').title = collapsed ? t('expand') : t('collapse');
+  $('legendToggle').setAttribute('aria-expanded', String(!collapsed));
 }
 
-function showPopup(vessel) {
-  const popup = $('popup');
-  if (!vessel) { popup.classList.add('hidden'); state.selected = null; return; }
-  state.selected = vessel;
-  const fix = state.scene.getCurrentFix(vessel);
-  const cat = CATEGORIES[vessel.category];
-  const lang = getLang();
-
-  $('popupName').textContent = vessel.name || t('infoMmsi') + ' ' + vessel.mmsi;
-  $('popupMmsi').textContent = `${t('infoMmsi')} ${vessel.mmsi}`;
-  const dims = [vessel.length, vessel.width]
-    .filter((n) => Number.isFinite(n) && n > 0)
-    .map((n) => Number(n.toFixed(1))).join(' × ');
-
-  $('popupBody').innerHTML = [
-    popupRow(t('infoType'), lang === 'zh' ? cat.zh : cat.en),
-    popupRow(t('infoImo'), vessel.imo),
-    popupRow(t('infoCallSign'), vessel.callsign),
-    popupRow(t('infoFlag'), vessel.flag),
-    popupRow(t('infoDestination'), vessel.dest),
-    dims ? popupRow(t('infoLength'), dims, ` ${t('unitMeters')}`) : '',
-    popupRow(t('infoSog'), Number.isFinite(fix[3]) ? fix[3].toFixed(1) : '', ` ${t('unitKnots')}`),
-    popupRow(t('infoCog'), Number.isFinite(fix[4]) ? fix[4].toFixed(1) : '', t('unitDegrees')),
-    popupRow(t('infoHeading'), Number.isFinite(fix[5]) ? fix[5].toFixed(0) : '', t('unitDegrees')),
-    popupRow(t('infoNav'), fix[6]),
-    popupRow(t('infoPosition'), `${fix[2].toFixed(4)}°, ${fix[1].toFixed(4)}°`),
-    popupRow(t('infoLastFix'), fmtTime(fix[0])),
-    popupRow(t('infoReports'), vessel.fixes.length),
-  ].join('');
-  $('popupTrackNote').textContent = vessel.fixes.length > 1
-    ? t('trackHint') : t('clickHint');
-  popup.classList.remove('hidden');
+function updateTicks() {
+  const dataset = state.dataset;
+  const ticks = $('ticks');
+  if (!dataset || !ticks) return;
+  const span = dataset.timeMax - dataset.timeMin;
+  const cells = ticks.children;
+  for (let i = 0; i < cells.length; i += 1) {
+    const ms = dataset.timeMin + (span * i) / Math.max(1, cells.length - 1);
+    cells[i].textContent = formatTime(ms);
+  }
 }
 
 function applyLanguage() {
   const lang = getLang();
   document.documentElement.lang = lang;
+
   $('appTitle').textContent = t('appTitle');
-  $('appSubtitle').textContent = t('appSubtitle');
-  $('labelVessels').textContent = t('vessels');
-  $('labelReports').textContent = t('positionReports');
+  $('appSubtitle').textContent = state.dataset
+    ? t('appSubtitle', formatDate(state.dataset.timeMin))
+    : '';
   $('langBtn').textContent = lang === 'en' ? '中文' : 'EN';
   $('langBtn').title = t('switchLang');
   $('legendTitle').textContent = t('legendTitle');
   $('legendHint').textContent = t('legendHint');
+  $('staleHint').textContent = t('staleHint');
+  $('lodHint').textContent = t('lodHint');
+  $('keyboardHint').textContent = t('keyboardHint');
   $('labelSpeed').textContent = t('speed');
   $('labelReset').textContent = t('restart');
-  $('playBtn').title = state.playing ? t('pause') : t('play');
-  $('resetBtn').title = t('restart');
-  $('legendToggle').title = $('legendBody').classList.contains('hidden') ? t('expand') : t('collapse');
+  $('retryBtn').textContent = t('retry');
+  $('loadingTitle').textContent = t('loadingTitle');
 
   for (const row of $('legendBody').children) {
     const cat = CATEGORIES[row.dataset.key];
-    row.querySelector('.legend-name').textContent = lang === 'zh' ? cat.zh : cat.en;
+    const name = row.querySelector('.legend-name');
+    if (cat && name) name.textContent = lang === 'zh' ? cat.zh : cat.en;
   }
-  if (state.selected) showPopup(state.selected);
+
+  state.popup?.relabel();
+  updatePlayButton();
+  updateStats();
+  updateTicks();
+}
+
+// ---------------------------------------------------------------------------
+// Clock and transport
+// ---------------------------------------------------------------------------
+
+function updateTimeUI() {
+  const scene = state.scene;
+  if (!scene) return;
+  const span = scene.timeMax - scene.timeMin;
+  const fraction = span > 0 ? (scene.currentTime - scene.timeMin) / span : 0;
+  if (!state.scrubbing) {
+    $('timeSlider').value = String(Math.round(Math.min(1, Math.max(0, fraction)) * 1000));
+  }
+  $('currentTime').textContent = formatTime(scene.currentTime);
+  updatePlayButton();
+}
+
+function refreshPopup() {
+  if (!state.selectedVessel || !state.scene) return;
+  state.popup?.update(
+    state.selectedVessel,
+    state.scene.snapshot(state.selectedVessel),
+  );
 }
 
 function setPlaying(on) {
-  state.playing = on;
-  $('playIcon').className = on ? 'icon-pause' : 'icon-play';
-  $('playBtn').title = on ? t('pause') : t('play');
+  state.playing = Boolean(on) && Boolean(state.scene);
   state.lastFrame = performance.now();
+  updatePlayButton();
+}
+
+function togglePlay() {
+  const scene = state.scene;
+  if (!scene) return;
+  if (scene.currentTime >= scene.timeMax) {
+    scene.setTime(scene.timeMin);
+    updateTimeUI();
+    scheduleUrlSync();
+  }
+  setPlaying(!state.playing);
+}
+
+function step(deltaMs) {
+  const scene = state.scene;
+  if (!scene) return;
+  scene.setTime(scene.currentTime + deltaMs);
+  updateTimeUI();
+  refreshPopup();
+  scheduleUrlSync();
 }
 
 function animate(now) {
   requestAnimationFrame(animate);
-  if (!state.playing || !state.scene) return;
-  const dt = Math.min(now - state.lastFrame, 250);
+  const elapsed = now - state.lastFrame;
   state.lastFrame = now;
-  const s = state.scene;
-  s.update(dt * state.speed);
-  $('timeSlider').value = Math.round(((s.currentTime - s.timeMin) / (s.timeMax - s.timeMin)) * 1000);
-  $('currentTime').textContent = fmtTime(s.currentTime);
-  if (state.selected) showPopup(state.selected);
-  if (s.currentTime >= s.timeMax) setPlaying(false);
+
+  const scene = state.scene;
+  if (!scene) return;
+
+  // Scrub seeks are coalesced to one scene update per frame: a range input
+  // fires on every pixel, and each update walks all vessels.
+  if (state.seekFraction !== null) {
+    const fraction = state.seekFraction;
+    state.seekFraction = null;
+    scene.setTime(scene.timeMin + fraction * (scene.timeMax - scene.timeMin));
+    $('currentTime').textContent = formatTime(scene.currentTime);
+    refreshPopup();
+  }
+
+  if (!state.playing || state.scrubbing) return;
+
+  scene.update(Math.min(elapsed, 250) * state.speed);
+  updateTimeUI();
+  if (state.selectedVessel) refreshPopup();
+
+  if (scene.currentTime >= scene.timeMax) {
+    setPlaying(false);
+    updatePlayButton();
+    scheduleUrlSync();
+  }
 }
 
+// ---------------------------------------------------------------------------
+// Selection and URL state
+// ---------------------------------------------------------------------------
+
+function selectIndex(index, { reveal = false } = {}) {
+  const scene = state.scene;
+  if (!scene || index < 0 || index >= scene.vessels.length) return;
+  const vessel = scene.vessels[index];
+  scene.select(index);
+  state.selectedIndex = index;
+  state.selectedVessel = vessel;
+  state.popup?.show(vessel, scene.snapshot(vessel));
+  if (reveal) scene.revealVessel(index);
+  scheduleUrlSync();
+}
+
+function clearSelection() {
+  state.scene?.clearSelection();
+}
+
+function syncUrl() {
+  const scene = state.scene;
+  if (!scene) return;
+  const params = new URLSearchParams();
+  params.set('t', new Date(Math.round(scene.currentTime / 1000) * 1000).toISOString());
+  if (state.selectedVessel) params.set('mmsi', state.selectedVessel.mmsi);
+  if (getLang() === 'zh') params.set('lang', 'zh');
+  if (state.speed !== 60) params.set('speed', String(state.speed));
+  const url = `${location.pathname}?${params.toString()}`;
+  history.replaceState(null, '', url);
+}
+
+function scheduleUrlSync() {
+  clearTimeout(state.urlTimer);
+  state.urlTimer = setTimeout(syncUrl, 400);
+}
+
+function readUrlState() {
+  const params = new URLSearchParams(location.search);
+
+  const lang = params.get('lang');
+  if (lang === 'zh' || lang === 'en') setLang(lang);
+
+  const speed = Number(params.get('speed'));
+  if (SPEEDS.includes(speed)) {
+    state.speed = speed;
+    $('speedSelect').value = String(speed);
+  }
+
+  const time = params.get('t');
+  if (time) {
+    const ms = Date.parse(time);
+    if (Number.isFinite(ms)) state.pendingTime = ms;
+  }
+
+  const mmsi = params.get('mmsi');
+  if (mmsi) state.pendingMmsi = mmsi;
+}
+
+function applyUrlState() {
+  const scene = state.scene;
+  if (!scene) return;
+
+  if (state.pendingTime !== null) {
+    scene.setTime(state.pendingTime);
+    state.pendingTime = null;
+  }
+
+  if (state.pendingMmsi) {
+    const index = state.mmsiIndex.get(state.pendingMmsi);
+    state.pendingMmsi = null;
+    if (index !== undefined) selectIndex(index, { reveal: true });
+  }
+
+  updateTimeUI();
+  refreshPopup();
+}
+
+// ---------------------------------------------------------------------------
+// Loading
+// ---------------------------------------------------------------------------
+
+function describeProgress(p) {
+  if (p.phase === 'manifest') return t('phaseManifest');
+  if (p.phase === 'decode') return t('phaseDecode');
+
+  const name = p.name ? `${p.name} · ` : '';
+  if (p.phase === 'parse') {
+    return `${t('phaseParse')} ${name}${t('phaseRows', (p.parsed ?? 0).toLocaleString())}`;
+  }
+  if (p.phase === 'download') {
+    const loadedMb = ((p.loaded ?? 0) / 1048576).toFixed(1);
+    // Only show a total when the server reported one that is still consistent
+    // with the bytes received; a stale or missing length would otherwise render
+    // impossible values such as "8.0 / 7.1 MB".
+    if (p.totalBytes && p.totalBytes >= (p.loaded ?? 0)) {
+      return `${t('phaseDownload')} ${name}${t('phaseBytes', loadedMb, (p.totalBytes / 1048576).toFixed(1))}`;
+    }
+    return `${t('phaseDownload')} ${name}${loadedMb} MB`;
+  }
+  return '';
+}
+
+function onLoadProgress(p) {
+  setLoading(t('loadingTitle'), describeProgress(p));
+}
+
+function teardownScene() {
+  if (state.scene) {
+    state.scene.destroy();
+    state.scene = null;
+  }
+  state.selectedIndex = -1;
+  state.selectedVessel = null;
+  state.popup?.hide();
+}
+
+function initScene(dataset) {
+  teardownScene();
+
+  const scene = new VoyageScene('cesiumContainer');
+  state.scene = scene;
+  scene.load(dataset);
+
+  scene.onSelect = (vessel, index) => {
+    if (!vessel) {
+      state.selectedIndex = -1;
+      state.selectedVessel = null;
+      state.popup?.hide();
+      return;
+    }
+    state.selectedIndex = index;
+    state.selectedVessel = vessel;
+    state.popup?.show(vessel, scene.snapshot(vessel));
+    scene.revealVessel(index);
+    scheduleUrlSync();
+  };
+}
+
+async function boot() {
+  hideError();
+  $('loading').classList.remove('hidden');
+  setLoading(t('loadingTitle'), t('phaseManifest'));
+
+  try {
+    const dataset = await loadDataset({ onProgress: onLoadProgress });
+    state.dataset = dataset;
+
+    state.categoryTotals = {};
+    for (const v of dataset.vessels) {
+      const key = CATEGORY_ORDER[v.categoryId] || 'OTHER';
+      state.categoryTotals[key] = (state.categoryTotals[key] || 0) + 1;
+    }
+    state.mmsiIndex = new Map(dataset.vessels.map((v, i) => [v.mmsi, i]));
+
+    initScene(dataset);
+    buildLegend();
+    applyLanguage();
+
+    $('startTime').textContent = formatTime(dataset.timeMin);
+    $('endTime').textContent = formatTime(dataset.timeMax);
+    $('currentTime').textContent = formatTime(dataset.timeMin);
+
+    applyUrlState();
+    updateTimeUI();
+    updateStats();
+    updateTicks();
+
+    $('loading').classList.add('hidden');
+    state.lastFrame = performance.now();
+
+    const source = dataset.source === 'binary' ? t('sourceBinary') : t('sourceCsv');
+    if (import.meta.env.DEV) {
+      console.info(
+        `[data] ${t('loadSummary', dataset.vessels.length, dataset.stats.reportCount)}`
+        + ` · ${source}`
+        + (dataset.stats.skipped ? ` · skipped ${dataset.stats.skipped}` : '')
+        + (dataset.stats.invalidImo ? ` · invalid IMO ${dataset.stats.invalidImo}` : ''),
+      );
+    }
+  } catch (err) {
+    console.error(err);
+    showError(`${t('errorTitle')}: ${err?.message ?? err}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
 function bindUI() {
-  $('playBtn').addEventListener('click', () => {
-    if (!state.scene) return;
-    if (state.scene.currentTime >= state.scene.timeMax) state.scene.setTime(state.scene.timeMin);
-    setPlaying(!state.playing);
-  });
+  if (state.uiBound) return;
+  state.uiBound = true;
+
+  $('playBtn').addEventListener('click', togglePlay);
+
   $('resetBtn').addEventListener('click', () => {
-    if (!state.scene) return;
-    state.scene.setTime(state.scene.timeMin);
-    $('timeSlider').value = 0;
-    $('currentTime').textContent = fmtTime(state.scene.timeMin);
+    const scene = state.scene;
+    if (!scene) return;
+    scene.setTime(scene.timeMin);
+    updateTimeUI();
+    refreshPopup();
     setPlaying(false);
+    scheduleUrlSync();
   });
-  $('timeSlider').addEventListener('input', (e) => {
+
+  const slider = $('timeSlider');
+
+  slider.addEventListener('pointerdown', (event) => {
     if (!state.scene) return;
-    const f = Number(e.target.value) / 1000;
-    state.scene.setTime(state.scene.timeMin + f * (state.scene.timeMax - state.scene.timeMin));
-    $('currentTime').textContent = fmtTime(state.scene.currentTime);
+    state.resumeAfterScrub = state.playing;
+    state.scrubbing = true;
+    setPlaying(false);
+    // Capture the pointer so releasing outside the track still ends the scrub.
+    try { slider.setPointerCapture(event.pointerId); } catch { /* unsupported */ }
   });
-  $('speedSelect').addEventListener('change', (e) => { state.speed = Number(e.target.value); });
+
+  const endScrub = () => {
+    if (!state.scrubbing) return;
+    state.scrubbing = false;
+    // Re-seed the clock so the frame elapsed during the drag is not replayed.
+    state.lastFrame = performance.now();
+    if (state.resumeAfterScrub) setPlaying(true);
+    state.resumeAfterScrub = false;
+    scheduleUrlSync();
+  };
+  slider.addEventListener('pointerup', endScrub);
+  slider.addEventListener('pointercancel', endScrub);
+  slider.addEventListener('blur', endScrub);
+
+  slider.addEventListener('input', (event) => {
+    const scene = state.scene;
+    if (!scene) return;
+    state.seekFraction = Number(event.target.value) / 1000;
+    $('currentTime').textContent = formatTime(
+      scene.timeMin + state.seekFraction * (scene.timeMax - scene.timeMin),
+    );
+  });
+
+  $('speedSelect').addEventListener('change', (event) => {
+    state.speed = Number(event.target.value) || 60;
+    scheduleUrlSync();
+  });
+
   $('langBtn').addEventListener('click', () => {
     setLang(getLang() === 'en' ? 'zh' : 'en');
     applyLanguage();
+    scheduleUrlSync();
   });
-  $('popupClose').addEventListener('click', () => {
-    state.scene?.clearSelection();
-    $('popup').classList.add('hidden');
-  });
+
+  $('popupClose').addEventListener('click', clearSelection);
+
   $('legendToggle').addEventListener('click', () => {
-    const hidden = $('legendBody').classList.toggle('hidden');
-    $('legendHint').classList.toggle('hidden', hidden);
-    $('legendToggle').textContent = hidden ? '+' : '−';
-    $('legendToggle').title = hidden ? t('expand') : t('collapse');
+    const expanded = $('legendBody').classList.contains('hidden');
+    setLegendCollapsed(!expanded);
   });
+
+  $('retryBtn').addEventListener('click', () => {
+    boot();
+  });
+
+  window.addEventListener('keydown', (event) => {
+    const tag = event.target?.tagName;
+    // Buttons keep their native Space activation; inputs keep their own keys.
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
+
+    if (event.code === 'Space') {
+      event.preventDefault();
+      togglePlay();
+    } else if (event.code === 'ArrowLeft') {
+      event.preventDefault();
+      step(-STEP_MS);
+    } else if (event.code === 'ArrowRight') {
+      event.preventDefault();
+      step(STEP_MS);
+    } else if (event.code === 'Escape') {
+      clearSelection();
+    }
+  });
+
   requestAnimationFrame(animate);
 }
 
-async function bootstrap() {
-  setLoading(t('fetchDetail'));
+function init() {
+  state.popup = new VesselPopup({
+    root: $('popup'),
+    nameEl: $('popupName'),
+    mmsiEl: $('popupMmsi'),
+    bodyEl: $('popupBody'),
+    noteEl: $('popupTrackNote'),
+    closeBtn: $('popupClose'),
+  }, { onClose: clearSelection });
+
+  readUrlState();
   bindUI();
   applyLanguage();
+  // On narrow screens the expanded legend covers most of the globe.
+  if (window.innerWidth <= 900) setLegendCollapsed(true);
+  window.addEventListener('resize', () => updateTimeUI());
 
-  const texts = [];
-  for (const name of CSV_FILES) {
-    try {
-      texts.push(await fetchText(name));
-    } catch (e) {
-      showError(t('missingFile', name));
-      return;
-    }
-  }
-  setLoading(t('buildDetail'));
-  const groups = [];
-  for (let i = 0; i < texts.length; i += 1) {
-    groups.push(await parseInWorker(texts[i], String.fromCharCode(65 + i)));
-  }
-  const vessels = mergeVessels(groups);
-  if (!vessels.length) { showError(t('errorTitle')); return; }
-
-  let timeMin = Infinity;
-  let timeMax = -Infinity;
-  let reportCount = 0;
-  for (const v of vessels) {
-    timeMin = Math.min(timeMin, v.fixes[0][0]);
-    timeMax = Math.max(timeMax, v.fixes[v.fixes.length - 1][0]);
-    reportCount += v.fixes.length;
-  }
-
-  setLoading(t('renderDetail'));
-  const scene = new VoyageScene('cesiumContainer');
-  state.scene = scene;
-  scene.load(vessels, timeMin, timeMax);
-  scene.onSelect = (v) => showPopup(v);
-
-  buildLegend();
-  applyLanguage();
-  $('statVessels').textContent = vessels.length.toLocaleString();
-  $('statReports').textContent = reportCount.toLocaleString();
-  $('startTime').textContent = fmtTime(timeMin);
-  $('endTime').textContent = fmtTime(timeMax);
-  $('currentTime').textContent = fmtTime(timeMin);
-
-  $('loading').classList.add('hidden');
-  console.info(`Loaded ${vessels.length} vessels / ${reportCount} reports / ${fmtDate(timeMin)}`);
+  boot();
 }
 
-bootstrap().catch((e) => {
-  console.error(e, e?.stack || '');
-  showError(`${t('errorTitle')}: ${e.message}`);
-});
+// Vite HMR: a Viewer cannot be constructed twice into the same container, so
+// the previous instance must be destroyed before the module is replaced.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    state.scene?.destroy();
+    state.scene = null;
+  });
+}
+
+init();
