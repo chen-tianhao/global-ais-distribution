@@ -10,7 +10,7 @@ node_modules/
 jspm_packages/
 
 # ---------- 构建产物 ----------
-dist/
+# dist/
 dist-ssr/
 build/
 .vite/
