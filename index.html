@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIS Voyage Replay</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b1622'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%234fc3f7'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%234fc3f7' stroke-opacity='0.5' stroke-width='2'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <div id="topbar" class="panel">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div>
+        <h1 id="appTitle">AIS Voyage Replay</h1>
+        <p id="appSubtitle">Global vessel positions</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="stat"><span id="statVessels">0</span><small id="labelVessels">vessels</small></div>
+      <div class="stat"><span id="statReports">0</span><small id="labelReports">position reports</small></div>
+      <button id="langBtn" class="lang-btn" title="Switch language">中文</button>
+    </div>
+  </div>
+
+  <div id="legend" class="panel">
+    <div class="panel-head">
+      <h2 id="legendTitle">Vessel types</h2>
+      <button id="legendToggle" class="mini-btn" title="Collapse">−</button>
+    </div>
+    <div id="legendBody"></div>
+    <p class="legend-hint" id="legendHint">Click a category to show / hide</p>
+  </div>
+
+  <div id="playbar" class="panel">
+    <div class="play-left">
+      <button id="playBtn" class="play-btn" aria-label="Play">
+        <span id="playIcon" class="icon-play"></span>
+      </button>
+      <div class="time-block">
+        <div id="currentTime" class="current-time">--:--:--</div>
+        <div class="time-range"><span id="startTime">--</span> — <span id="endTime">--</span> UTC</div>
+      </div>
+    </div>
+    <div class="scrubber">
+      <input id="timeSlider" type="range" min="0" max="1000" value="0" step="1" />
+      <div class="ticks"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+    </div>
+    <div class="play-right">
+      <label for="speedSelect" id="labelSpeed">Speed</label>
+      <select id="speedSelect">
+        <option value="30">30×</option>
+        <option value="60" selected>60×</option>
+        <option value="120">120×</option>
+        <option value="300">300×</option>
+      </select>
+      <button id="resetBtn" class="mini-btn wide" title="Restart">↺ <span id="labelReset">Restart</span></button>
+    </div>
+  </div>
+
+  <div id="popup" class="popup hidden">
+    <div class="popup-head">
+      <div>
+        <div id="popupName" class="popup-name">—</div>
+        <div id="popupMmsi" class="popup-mmsi">MMSI —</div>
+      </div>
+      <button id="popupClose" class="popup-close" aria-label="Close">×</button>
+    </div>
+    <div id="popupBody" class="popup-body"></div>
+    <div id="popupTrackNote" class="popup-track-note"></div>
+  </div>
+
+  <div id="loading" class="overlay">
+    <div class="loading-card">
+      <div class="spinner"></div>
+      <div id="loadingTitle">Loading AIS data…</div>
+      <div id="loadingDetail" class="loading-detail">Fetching CSV files</div>
+    </div>
+  </div>
+
+  <div id="errorBanner" class="error-banner hidden"></div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
