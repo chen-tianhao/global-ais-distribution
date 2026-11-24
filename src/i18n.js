@@ -6,7 +6,7 @@
 
 const DICT = {
   en: {
-    appTitle: 'AIS Voyage Replay',
+    appTitle: 'Global AIS Data Validation',
     appSubtitle: (date) => `Global vessel positions · ${date}`,
     vessels: 'vessels visible',
     positionReports: 'position reports',

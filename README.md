@@ -1,4 +1,4 @@
-# AIS Voyage Replay
+# Global AIS Data Validation
 
 Global AIS vessel positions rendered as an interactive replay. Pure client-side:
 CesiumJS for the globe, Vite for the build, no Cesium ion token required.
